@@ -83,8 +83,15 @@ impl LdapDirectory {
 
                     ldap3::drive!(auth_bind_conn);
 
-                    let dn = auth_bind.filter.build(username);
+                    let username = &self
+                        .email_to_username(username)
+                        .await
+                        .expect("non error value for username")
+                        .expect("non null value for username");
+                    println!("real username: {}", username);
 
+                    let dn = auth_bind.filter.build(username);
+                    
                     trc::event!(Store(trc::StoreEvent::LdapBind), Details = dn.clone());
 
                     if ldap
@@ -252,6 +259,46 @@ impl LdapDirectory {
                             .await
                             .map(Some);
                     }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn email_to_username(&self, address: &str) -> trc::Result<Option<String>> {
+        let filter = self.mappings.filter_email.build(address.as_ref());
+        let rs = self
+            .pool
+            .get()
+            .await
+            .map_err(|err| err.into_error().caused_by(trc::location!()))?
+            .search(
+                &self.mappings.base_dn,
+                Scope::Subtree,
+                &filter,
+                &self.mappings.attr_name
+            )
+            .await
+            .map_err(|err| err.into_error().caused_by(trc::location!()))?
+            .success()
+            .map(|(rs, _res)| rs)
+            .map_err(|err| err.into_error().caused_by(trc::location!()))?;
+
+        trc::event!(
+            Store(trc::StoreEvent::LdapQuery),
+            Details = filter,
+            Result = rs.iter().map(result_to_trace).collect::<Vec<_>>()
+        );
+
+        for entry in rs {
+            let entry = SearchEntry::construct(entry);
+            println!("entry: {:?}, attr_name: {:?}", entry, self.mappings.attr_name);
+
+
+            for attr in &self.mappings.attr_name {
+                if let Some(name) = entry.attrs.get(attr).and_then(|v| v.first()) {
+                    return Ok(Some(name.clone()));
                 }
             }
         }
